@@ -25,11 +25,12 @@ using namespace caffe;  // NOLINT(build/namespaces)
 using namespace cv;
 using namespace std;
 
-#define DEBUG 0
+//#define DEBUG 0
 
 Net<float> caffe_test_net("predict.prototxt");
+const float * mean_value;
 
-int predict(queue<Mat> frames,string net_proto,string pretrained_model,string mean_file,string mode,int device_id) ;
+int predict(queue<Mat> frames) ;
 
 int main(int argc, char const *argv[])
 {
@@ -77,7 +78,7 @@ int main(int argc, char const *argv[])
   CHECK_EQ(data_mean_.length(), 16);
   CHECK_EQ(data_mean_.height(), 128);
   CHECK_EQ(data_mean_.width(), 171);
-  const float * mean_value = data_mean_.cpu_data();
+  mean_value = data_mean_.cpu_data();
   int mean_size = data_mean_.num()*data_mean_.channels()*data_mean_.length()*data_mean_.height()*data_mean_.width();
 
   // read files and predict
@@ -118,7 +119,10 @@ int main(int argc, char const *argv[])
         {
           frames.pop();
           frames.push(tempImg);
-          int label = predict(frames,net_proto,pretrained_model,mean_file,mode,device_id);
+          //int label = predict(frames,net_proto,pretrained_model,mean_file,mode,device_id);
+          clock_t t1 = clock();
+          int label = predict(frames);
+          LOG(ERROR)<<"predict use "<<(clock()-t1)/(double)CLOCKS_PER_SEC*1000<<" ms";
           if (label>=0&&label<=4) {
             string action_name = map_label[label];
             putText(tempImg,action_name,Point(50,50),FONT_HERSHEY_PLAIN,2,Scalar(255,0,255));
@@ -133,7 +137,7 @@ int main(int argc, char const *argv[])
 }
 
 
-int predict(queue<Mat> frames,string net_proto,string pretrained_model,string mean_file,string mode,int device_id) 
+int predict(queue<Mat> frames) 
 {   
     int num = 1;
     int channels = 3;
