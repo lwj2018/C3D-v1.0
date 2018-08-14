@@ -11,48 +11,121 @@
 #include <cstring>
 #include <cstdlib>
 #include <vector>
+#include <queue>
+#include <map>
 
 #include "caffe/caffe.hpp"
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
+#include <fstream>
+
 using namespace caffe;  // NOLINT(build/namespaces)
 using namespace cv;
+using namespace std;
 
 #define DEBUG 0
 
+int predict(queue<Mat> frames);
+void predict_config(string net_proto,string pretrained_model,
+                string mean_file,string mode,int device_id);
 
+Net<float> caffe_test_net;
+const float* mean;
 
-int main(int argc, char** argv) {
+int main(int argc, char const *argv[])
+{
   if (argc < 4 || argc > 6) {
     LOG(ERROR) << "test_net net_proto pretrained_net_proto iterations "
         << "[CPU/GPU] [Device ID]";
     return 1;
   }
-
-  Caffe::set_phase(Caffe::TEST);
-
   if (argc >= 5 && strcmp(argv[4], "GPU") == 0) {
-    Caffe::set_mode(Caffe::GPU);
+    string mode = argv[4]; 
     int device_id = 0;
     if (argc == 6) {
       device_id = atoi(argv[5]);
     }
-    Caffe::SetDevice(device_id);
-    LOG(ERROR) << "Using GPU #" << device_id;
   } else {
-    LOG(ERROR) << "Using CPU";
-    Caffe::set_mode(Caffe::CPU);
+    string mode = "CPU";
   }
 
-  // 建立网络，复制网络参数
-  Net<float> caffe_test_net(argv[1]);
-  caffe_test_net.CopyTrainedLayersFrom(argv[2]);
+  // config the predictor
+  predict_config(net_proto,pretrained_model,mean_file,mode,device_id);
+
+  // read files and predict
+  // 采用滑窗法
+  int length = 16;// 图片序列长度固定为16
+  queue<Mat> frames;// 用于储存图片序列的队列
+  ifstream input_list("predict.txt");// 输入文件列表
+  CHECK(input_list.is_open)<<"can not open file predict.txt";
+  string filename;
+  string dirName;
+  string outFileName;
+  int start_frame;
+  int ignore;
+  int frm_count = 0;
+
+  // label与动作名之间的对应关系
+  map<int,string> map_label;
+  map_label[0] = "place";
+  map_label[1] = "push";
+  map_label[2] = "screw";
+  map_label[3] = "turndown";
+  map_label[4] = "press";
+
+  while(input_list>>dirName>>start_frame>>ignore)
+  {
+    for(int i = start_frame; i < start_frame+length; i++)
+    {
+        sprintf(filename,"%s/%06d.jpg",dirName,i);
+        sprintf(outFileName,"output/predict_frm/%06d.jpg",++frm_count);
+        Mat tempImg = imread(filename);
+        if(!tempImg.data) LOG(ERROR) << "Could not open or find file" << filename;
+        if(frames.size()<length)
+        {
+          frames.push(tempImg);
+          imwrite(outFileName,tempImg);
+        } 
+        else if(frames.size()>=length) 
+        {
+          frames.pop();
+          frames.push(tempImg);
+          int label = predict(frames);
+          if (label>=0&&label<=4) {
+            string action_name = map_label[label];
+            putText(tempImg,action_name,Point(50,50),FONT_HERSHEY_PLAIN,2,Scalar(255,0,255));
+          }
+          imwrite(outFileName,tempImg);
+        }
+    }
+    
+  }
+
+  return 0;
+}
+
+void predict_config(string net_proto,string pretrained_model,
+                string mean_file,string mode,int device_id)
+{
+    Caffe::set_phase(Caffe::TEST);
+    if (strcmp(mode, "GPU") == 0) {
+      Caffe::set_mode(Caffe::GPU);
+      Caffe::SetDevice(device_id);
+      LOG(ERROR) << "Using GPU #" << device_id;
+    } else {
+      LOG(ERROR) << "Using CPU";
+      Caffe::set_mode(Caffe::CPU);
+    }
+    // 建立网络，复制网络参数
+    NetParameter param;
+    ReadNetParamsFromTextFileOrDie(net_proto, &param);
+    caffe_test_net.Init(param);
+    caffe_test_net.CopyTrainedLayersFrom(pretrained_model);
 
     //读取均值文件
     Blob<float> data_mean_;
-    const string& mean_file = argv[3];
     LOG(INFO) << "Loading mean file from " << mean_file;
     BlobProto blob_proto;
     ReadProtoFromBinaryFileOrDie(mean_file.c_str(), &blob_proto);
@@ -62,11 +135,13 @@ int main(int argc, char** argv) {
     CHECK_EQ(data_mean_.length(), 16);
     CHECK_EQ(data_mean_.height(), 128);
     CHECK_EQ(data_mean_.width(), 171);
-    const float* mean = data_mean_.cpu_data();
+    mean = data_mean_.cpu_data();
     int mean_size = data_mean_.num()*data_mean_.channels()*data_mean_.length()*data_mean_.height()*data_mean_.width();
+}
 
-    //读取文件 （之后可能会去掉）
-    char filename[50];
+int predict(queue<Mat> frames) 
+{
+
     int num = 1;
     int channels = 3;
     int length = 16;
@@ -88,10 +163,9 @@ int main(int argc, char** argv) {
   
     for(int i = 0; i < length; i++)
     {
-        sprintf(filename,"input/processed_frm/2_3/%06d.jpg",i+1);
-        Mat tempImg = imread(filename);
-        if(!tempImg.data) LOG(ERROR) << "Could not open or find file" << filename; 
-        //tempImg.convertTo(tempImg,CV_32F,1.0/255.0);
+        Mat tempImg = frames.front();
+        frames.pop();
+        CHECK(tempImg.data)<<"can not read image from queue";
         #ifdef DEBUG
           LOG(ERROR)<<"one value of image:"<<tempImg.at<Vec3f>(80,60)[0];
         #endif
@@ -102,11 +176,9 @@ int main(int argc, char** argv) {
               int top_index = ((c * length + i) * crop_size + h)
                               * crop_size + w;
               int data_index = ((c * length + i) * height + h + h_off) * width + w + w_off;
-              #ifdef DEBUG
-                CHECK_GT(size,top_index)<<"top_data segmentation fault";
-                CHECK_GT(mean_size,data_index)<<"mean_data)_ segmentation fault";
-                int datum_element = tempImg.at<Vec3b>(h+h_off,w+w_off)[c];
-              #endif
+              CHECK_GT(size,top_index)<<"top_data segmentation fault";
+              //CHECK_GT(mean_size,data_index)<<"mean_data_ segmentation fault";
+              int datum_element = tempImg.at<Vec3b>(h+h_off,w+w_off)[c];
               top_data->mutable_cpu_data()[top_index] = datum_element - mean[data_index]; 
             }
     }
@@ -129,16 +201,17 @@ int main(int argc, char** argv) {
     for(int j = 0; j < 5; j++)
     {
         float data = feature_blob.get()->cpu_data()[j];
-        LOG(ERROR) << data;
+        #ifdef DEBUG
+          LOG(ERROR) << data;
+        #endif
         if(data>max)
         {
-        max = data;
-        maxIndex = j;
+          max = data;
+          maxIndex = j;
         }
     }
+    if(max<0.9) maxIndex = -1;
     LOG(ERROR) << maxIndex;      
     
-  
-
-  return 0;
+  return maxIndex;
 }
