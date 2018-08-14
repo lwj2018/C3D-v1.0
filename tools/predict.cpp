@@ -27,23 +27,25 @@ using namespace std;
 
 #define DEBUG 0
 
-int predict(queue<Mat> frames);
-void predict_config(string net_proto,string pretrained_model,
-                string mean_file,string mode,int device_id);
+Net<float> caffe_test_net("predict.prototxt");
 
-Net<float> caffe_test_net;
-const float* mean;
+int predict(queue<Mat> frames,string net_proto,string pretrained_model,string mean_file,string mode,int device_id) ;
 
 int main(int argc, char const *argv[])
 {
+  string net_proto = argv[1];
+  string pretrained_model = argv[2];
+  string mean_file = argv[3];
+  string mode;
+  int device_id;
   if (argc < 4 || argc > 6) {
     LOG(ERROR) << "test_net net_proto pretrained_net_proto iterations "
         << "[CPU/GPU] [Device ID]";
     return 1;
   }
   if (argc >= 5 && strcmp(argv[4], "GPU") == 0) {
-    string mode = argv[4]; 
-    int device_id = 0;
+    mode = argv[4]; 
+    device_id = 0;
     if (argc == 6) {
       device_id = atoi(argv[5]);
     }
@@ -52,17 +54,41 @@ int main(int argc, char const *argv[])
   }
 
   // config the predictor
-  predict_config(net_proto,pretrained_model,mean_file,mode,device_id);
+  Caffe::set_phase(Caffe::TEST);
+  if (strcmp(mode.c_str(), "GPU") == 0) {
+    Caffe::set_mode(Caffe::GPU);
+    Caffe::SetDevice(device_id);
+    LOG(ERROR) << "Using GPU #" << device_id;
+  } else {
+    LOG(ERROR) << "Using CPU";
+    Caffe::set_mode(Caffe::CPU);
+  }
+  // 建立网络，复制网络参数
+  caffe_test_net.CopyTrainedLayersFrom(pretrained_model.c_str());
+
+  //读取均值文件
+  Blob<float> data_mean_;
+  LOG(INFO) << "Loading mean_value file from " << mean_file;
+  BlobProto blob_proto;
+  ReadProtoFromBinaryFileOrDie(mean_file.c_str(), &blob_proto);
+  data_mean_.FromProto(blob_proto);
+  CHECK_EQ(data_mean_.num(), 1);
+  CHECK_EQ(data_mean_.channels(), 3);
+  CHECK_EQ(data_mean_.length(), 16);
+  CHECK_EQ(data_mean_.height(), 128);
+  CHECK_EQ(data_mean_.width(), 171);
+  const float * mean_value = data_mean_.cpu_data();
+  int mean_size = data_mean_.num()*data_mean_.channels()*data_mean_.length()*data_mean_.height()*data_mean_.width();
 
   // read files and predict
   // 采用滑窗法
   int length = 16;// 图片序列长度固定为16
   queue<Mat> frames;// 用于储存图片序列的队列
   ifstream input_list("predict.txt");// 输入文件列表
-  CHECK(input_list.is_open)<<"can not open file predict.txt";
-  string filename;
-  string dirName;
-  string outFileName;
+  CHECK(input_list.is_open())<<"can not open file predict.txt";
+  char filename[50];
+  char dirName[50];
+  char outFileName[50];
   int start_frame;
   int ignore;
   int frm_count = 0;
@@ -92,7 +118,7 @@ int main(int argc, char const *argv[])
         {
           frames.pop();
           frames.push(tempImg);
-          int label = predict(frames);
+          int label = predict(frames,net_proto,pretrained_model,mean_file,mode,device_id);
           if (label>=0&&label<=4) {
             string action_name = map_label[label];
             putText(tempImg,action_name,Point(50,50),FONT_HERSHEY_PLAIN,2,Scalar(255,0,255));
@@ -106,42 +132,9 @@ int main(int argc, char const *argv[])
   return 0;
 }
 
-void predict_config(string net_proto,string pretrained_model,
-                string mean_file,string mode,int device_id)
-{
-    Caffe::set_phase(Caffe::TEST);
-    if (strcmp(mode, "GPU") == 0) {
-      Caffe::set_mode(Caffe::GPU);
-      Caffe::SetDevice(device_id);
-      LOG(ERROR) << "Using GPU #" << device_id;
-    } else {
-      LOG(ERROR) << "Using CPU";
-      Caffe::set_mode(Caffe::CPU);
-    }
-    // 建立网络，复制网络参数
-    NetParameter param;
-    ReadNetParamsFromTextFileOrDie(net_proto, &param);
-    caffe_test_net.Init(param);
-    caffe_test_net.CopyTrainedLayersFrom(pretrained_model);
 
-    //读取均值文件
-    Blob<float> data_mean_;
-    LOG(INFO) << "Loading mean file from " << mean_file;
-    BlobProto blob_proto;
-    ReadProtoFromBinaryFileOrDie(mean_file.c_str(), &blob_proto);
-    data_mean_.FromProto(blob_proto);
-    CHECK_EQ(data_mean_.num(), 1);
-    CHECK_EQ(data_mean_.channels(), 3);
-    CHECK_EQ(data_mean_.length(), 16);
-    CHECK_EQ(data_mean_.height(), 128);
-    CHECK_EQ(data_mean_.width(), 171);
-    mean = data_mean_.cpu_data();
-    int mean_size = data_mean_.num()*data_mean_.channels()*data_mean_.length()*data_mean_.height()*data_mean_.width();
-}
-
-int predict(queue<Mat> frames) 
-{
-
+int predict(queue<Mat> frames,string net_proto,string pretrained_model,string mean_file,string mode,int device_id) 
+{   
     int num = 1;
     int channels = 3;
     int length = 16;
@@ -179,7 +172,7 @@ int predict(queue<Mat> frames)
               CHECK_GT(size,top_index)<<"top_data segmentation fault";
               //CHECK_GT(mean_size,data_index)<<"mean_data_ segmentation fault";
               int datum_element = tempImg.at<Vec3b>(h+h_off,w+w_off)[c];
-              top_data->mutable_cpu_data()[top_index] = datum_element - mean[data_index]; 
+              top_data->mutable_cpu_data()[top_index] = datum_element - mean_value[data_index]; 
             }
     }
     #ifdef DEBUG
